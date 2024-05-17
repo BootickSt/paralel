@@ -4,14 +4,14 @@ HOST = -acc=host
 MULT = -acc=multicore
 CXX = pgc++
 
-all:serial multi
+all: onecore multicore
 	
 
-serial:
-	$(CXX) $(HOST) $(INFO) $(LIBS) -o $@ task.cpp
+onecore: task.cpp
+	$(CXX) $(HOST) $(INFO) $(LIBS) -o $@ $<
 
-multi:
-	$(CXX) $(MULT) $(INFO) $(LIBS) -o $@ task.cpp
+multicore: task.cpp
+	$(CXX) $(MULT) $(INFO) $(LIBS) -o $@ $<
 
 clean:all
-	rm serial multi
+	rm onecore multicore
