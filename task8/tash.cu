@@ -110,6 +110,34 @@ __global__ void compute_error(double* matrix, double* lastMatrix, double* max_er
     }
 }
 
+struct CudaGraphDeleter {
+    void operator()(cudaGraph_t* graph) const {
+        if (graph) {
+            cudaGraphDestroy(*graph);
+            delete graph;
+        }
+    }
+};
+
+struct CudaGraphExecDeleter {
+    void operator()(cudaGraphExec_t* graphExec) const {
+        if (graphExec) {
+            cudaGraphExecDestroy(*graphExec);
+            delete graphExec;
+        }
+    }
+};
+
+struct CudaStreamDeleter {
+    void operator()(cudaStream_t* stream) const {
+        if (stream) {
+            cudaStreamDestroy(*stream);
+            delete stream;
+        }
+    }
+};
+
+
 void savematrix(const double* matrix, int size, const std::string& filename) {
     std::ofstream outputFile(filename);
     if (!outputFile.is_open()) {
@@ -154,16 +182,15 @@ int main(int argc, char const *argv[]) {
 
     Data<double> matrix(size * size);
     Data<double> lastMatrix(size * size);
-    
+
     init(matrix, size);
     init(lastMatrix, size);
     double error;
     error = accuracy + 1;
     int iter = 0;
-   
+
     dim3 blockDim(32, 32);
     dim3 gridDim((size + blockDim.x - 1) / blockDim.x, (size + blockDim.y - 1) / blockDim.y);
-    int totalBlocks = gridDim.x * gridDim.y;
     Data<double> d_max_error(gridDim.x * gridDim.y);
     d_max_error.copyToDevice();
     matrix.copyToDevice();
@@ -172,44 +199,45 @@ int main(int argc, char const *argv[]) {
     double* lastMatrix_link = lastMatrix.getDevicePointer();
     double* d_max_error_link = d_max_error.getDevicePointer();
 
-    cudaGraph_t graph;
-    cudaGraphExec_t graphExec;
-    cudaStream_t stream;
-    cudaStreamCreate(&stream);
+    std::unique_ptr<cudaStream_t, CudaStreamDeleter> stream(new cudaStream_t);
+    std::unique_ptr<cudaGraph_t, CudaGraphDeleter> graph(new cudaGraph_t);
+    std::unique_ptr<cudaGraphExec_t, CudaGraphExecDeleter> graphExec(new cudaGraphExec_t);
+
+    cudaStreamCreate(stream.get());
 
     bool graphCreated = false;
 
-   
-cudaMemset(d_max_error_link, 0, sizeof(double)); 
+
+cudaMemset(d_max_error_link, 0, sizeof(double));
 
 while (iter < countIter && error > accuracy) {
     if (!graphCreated) {
-        cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
-        
+        cudaStreamBeginCapture(*stream, cudaStreamCaptureModeGlobal);
+
         for(int i = 0; i < 999; i++){
-            iterate<<<gridDim, blockDim, 0, stream>>>(matrix_link, lastMatrix_link, size);
+            iterate<<<gridDim, blockDim, 0, *stream>>>(matrix_link, lastMatrix_link, size);
             std::swap(lastMatrix_link, matrix_link);
         }
-        
-        iterate<<<gridDim, blockDim, 0, stream>>>(matrix_link, lastMatrix_link, size);
-        compute_error<32><<<gridDim, blockDim, 0, stream>>>(matrix_link, lastMatrix_link, d_max_error_link, size);
 
-        cudaStreamEndCapture(stream, &graph);
-        cudaGraphInstantiate(&graphExec, graph, nullptr, nullptr, 0);
-        
+        iterate<<<gridDim, blockDim, 0, *stream>>>(matrix_link, lastMatrix_link, size);
+        compute_error<32><<<gridDim, blockDim, 0, *stream>>>(matrix_link, lastMatrix_link, d_max_error_link, size);
+
+        cudaStreamEndCapture(*stream, graph.get());
+        cudaGraphInstantiate(graphExec.get(), *graph, nullptr, nullptr, 0);
+
         graphCreated = true;
     } else {
-        cudaGraphLaunch(graphExec, stream);
-        cudaStreamSynchronize(stream); 
-        
+        cudaGraphLaunch(*graphExec, *stream);
+        cudaStreamSynchronize(*stream);
+
         double temp_error;
         cudaMemcpy(&temp_error, d_max_error_link, sizeof(double), cudaMemcpyDeviceToHost);
         error = temp_error;
 
         std::cout << "Iteration: " << iter + 1000 << ", Error: " << error << std::endl;
-        
+
         iter += 1000;
-        cudaMemset(d_max_error_link, 0, sizeof(double)); 
+        cudaMemset(d_max_error_link, 0, sizeof(double));
     }
 }
 
@@ -221,9 +249,7 @@ while (iter < countIter && error > accuracy) {
             std::cout << std::endl;
         }
     }
-    cudaStreamDestroy(stream);
-    cudaGraphExecDestroy(graphExec);
-    cudaGraphDestroy(graph);
+
     matrix.copyToHost();
     auto end = std::chrono::high_resolution_clock::now();
     auto time_s = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
